@@ -1,74 +1,51 @@
 import streamlit as st
-import duckdb
 import pandas as pd
-from streamlit_folium import st_folium
-import folium
 import geopandas
+import folium
 import shapely
-
-
-@st.cache_resource
-def get_connection() -> duckdb.DuckDBPyConnection:
-    conn = duckdb.connect()
-    #     conn.sql("""\
-    # CREATE TABLE IF NOT EXISTS colleges AS select * from read_csv_auto('data/Most-Recent-Cohorts-Institution.csv');
-    # CREATE TABLE IF NOT EXISTS data_dictionary AS select * from read_csv_auto('data/Institution_Data_Dictionary.csv');
-    # """)
-
-    conn.sql(
-        """\
-CREATE TABLE IF NOT EXISTS data_dictionary AS SELECT * FROM 'data/data_dictionary.parquet';
-CREATE TABLE IF NOT EXISTS colleges AS SELECT * FROM 'data/colleges.parquet';
-"""
-    )
-    return conn
+from streamlit_folium import st_folium
 
 
 @st.cache_data
-def get_colleges_data_dictionary() -> pd.DataFrame:
-    conn = get_connection()
-    colleges_data_dictionary = conn.sql(
-        """select c.column_name, d."NAME OF DATA ELEMENT", c.data_type, c.is_nullable, d.LABEL, d."SHOWN/USE ON SITE"
-    from information_schema.columns c join data_dictionary d
-    on (c.column_name = d."VARIABLE NAME")
-    where c.table_name = 'colleges';
-"""
-    )
-    return colleges_data_dictionary.df()
+def get_raw_colleges_data() -> pd.DataFrame:
+    df = pd.read_parquet("data/colleges.parquet")
+    return df
 
 
 @st.cache_data
 def get_colleges_data() -> geopandas.GeoDataFrame:
-    conn = get_connection()
-    colleges_data = conn.sql(
-        """\
-select
-    INSTNM as name,
-    CITY as city,
-    STABBR as state,
-    ZIP as zipcode,
-    TRY_CAST(LATITUDE as DOUBLE) as lat,
-    TRY_CAST(LONGITUDE as DOUBLE) as lon,
-    INSTURL as homepage
-from colleges;
-    """
-    )
-    df = colleges_data.df()
+    name_mapping = {
+        "INSTNM": "name",
+        "CITY": "city",
+        "STABBR": "state",
+        "ZIP": "zipcode",
+        "LATITUDE": "lat",
+        "LONGITUDE": "lon",
+        "INSTURL": "homepage",
+    }
+    df = get_raw_colleges_data()[name_mapping.keys()]
+    df = df[df["LATITUDE"] != "NULL"]
+    df["LATITUDE"] = df["LATITUDE"].astype("float")
+    df["LONGITUDE"] = df["LONGITUDE"].astype("float")
+    df = df.rename(columns=name_mapping)
     gdf = geopandas.GeoDataFrame(df, geometry=geopandas.points_from_xy(df.lon, df.lat))
     return gdf
 
 
 @st.cache_data
-def get_raw_colleges_data() -> pd.DataFrame:
-    conn = get_connection()
-    colleges_data = conn.sql(
-        """\
-select
-*
-from colleges;
-    """
-    )
-    df = colleges_data.df()
+def get_colleges_data_dictionary() -> pd.DataFrame:
+    colleges = get_raw_colleges_data()
+    columns = [
+        "VARIABLE NAME",
+        "NAME OF DATA ELEMENT",
+        "dev-category",
+        "developer-friendly name",
+        "API data type",
+        "LABEL",
+        "SHOWN/USE ON SITE",
+    ]
+    df = pd.read_parquet("data/data_dictionary.parquet", columns=columns)
+    df = df[df["VARIABLE NAME"].isin(colleges.columns)]
     return df
 
 
@@ -79,10 +56,15 @@ def get_nearest_colleges(lon: float, lat: float, limit: int) -> geopandas.GeoDat
     gdf["distance"] = gdf.distance(point)
     return gdf.sort_values("distance").reset_index(drop=True).iloc[:limit]
 
-st.set_page_config(page_title="Nearest Colleges", page_icon="🎓", initial_sidebar_state="collapsed")
+
+st.set_page_config(
+    page_title="Nearest Colleges", page_icon="🎓", initial_sidebar_state="collapsed"
+)
+
 st.header("Find Nearest Colleges")
 with st.expander("What's This?"):
-    st.write("""\
+    st.write(
+        """\
         Move around the map to find the nearest colleges to the center of the map!
 
         Defaults to 10, but open the sidebar on the left to increase or decrease this number.
@@ -92,9 +74,9 @@ with st.expander("What's This?"):
         Data points come from U.S. College Scorecard Open Dataset (see the [official site](https://collegescorecard.ed.gov/) for better filtering and searching!)
 
         Built with ❤️ by [Gerard Bentley](https://gerardbentley.com)
-""")
+"""
+    )
 number_of_colleges = st.sidebar.number_input("Number of Colleges", 1, 100, 10)
-conn = get_connection()
 
 default_center = [34.101130680572346, -117.71258907392622]
 m = folium.Map(location=default_center, zoom_start=15)
